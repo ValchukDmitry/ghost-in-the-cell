@@ -1,3 +1,4 @@
+import javax.xml.stream.FactoryConfigurationError;
 import java.util.*;
 import java.io.*;
 import java.math.*;
@@ -9,6 +10,10 @@ import java.math.*;
 
 interface IEvent extends Comparable<IEvent> {
     String toString();
+
+    void updateGameObject(GameObject gameObject);
+
+    boolean predictor(GameObject gameObject);
 
     int getStep();
 }
@@ -27,12 +32,18 @@ class AttacksEventAdder implements IEventAdder {
         private Factory from;
         private Factory to;
         private int count;
+        private int step;
 
-        public Attack(int score, Factory from, Factory to, int count) {
+        public Attack(int score, Factory from, Factory to, int count, int step) {
             this.score = score;
             this.from = from;
             this.to = to;
             this.count = count;
+            this.step = step;
+        }
+
+        public int getStep() {
+            return step;
         }
 
         public Factory getFrom() {
@@ -48,7 +59,7 @@ class AttacksEventAdder implements IEventAdder {
         }
 
         public IEvent getEvent(int step) {
-            return new MoveEvent(step, count, from.id, to.id);
+            return new MoveEvent(step+this.step, count, from.id, to.id);
         }
 
         @Override
@@ -73,9 +84,10 @@ class AttacksEventAdder implements IEventAdder {
         Queue<Attack> attacks = new PriorityQueue<>();
         for (Factory e : enemyFactories) {
             for (Factory f : myFactories) {
-                int score = calcScore(f, e, gameObject);
-                int sent = howMuchToSent(f, e, gameObject);
-                attacks.add(new Attack(score, f, e, sent));
+                int bestStep =  calculateBestStepToAttack(f, e, gameObject);
+                int score = calcScore(f, e, bestStep, gameObject);
+                int sent = howMuchToSent(f, e, bestStep, gameObject);
+                attacks.add(new Attack(score, f, e, sent, bestStep));
             }
         }
         while(attacks.size()>0 && attackCount < MAX_ATTACK_COUNT) {
@@ -85,26 +97,47 @@ class AttacksEventAdder implements IEventAdder {
             }
             attacks.clear();
             events.add(currentAttack.getEvent(gameObject.getCurrentStep()));
-            System.err.print(currentAttack.getEvent(gameObject.getCurrentStep()).toString());
-            recalculatePredictions(currentAttack.getFrom(), currentAttack.getTo(), gameObject, currentAttack.getCount());
+            recalculatePredictions(currentAttack.getFrom(), currentAttack.getTo(), gameObject,
+                    currentAttack.getCount(), currentAttack.getStep());
             attackCount++;
             for (Factory e : enemyFactories) {
                 for (Factory f : myFactories) {
-                    int score = calcScore(f, e, gameObject);
-                    if(score > 300) {
-                        continue;
-                    }
-                    int sent = howMuchToSent(f, e, gameObject);
-                    attacks.add(new Attack(score, f, e, sent));
+                    int bestStep =  calculateBestStepToAttack(f, e, gameObject);
+                    int score = calcScore(f, e, bestStep, gameObject);
+                    int sent = howMuchToSent(f, e, bestStep, gameObject);
+                    attacks.add(new Attack(score, f, e, sent, bestStep));
                 }
             }
         }
         System.err.println();
     }
 
-    private static int calcScore(Factory friend, Factory enemy, GameObject gameObject) {
+    private int calculateBestStepToAttack(Factory friend, Factory enemy, GameObject gameObject) {
         int distance = gameObject.getDistances()[friend.id][enemy.id];
-        int enemyTroops = enemy.troopsOnStep.get(distance);
+        int maxNegative = -10000;
+        int bestStep = 0;
+        for(int step=distance; step < enemy.troopsOnStep.size(); step++) {
+            if(enemy.troopsOnStep.get(step) <= 0 && enemy.troopsOnStep.get(step) > maxNegative) {
+                maxNegative = enemy.troopsOnStep.get(step);
+                bestStep = step;
+            }
+        }
+        if(bestStep >= distance) {
+            return bestStep - distance;
+        } else {
+            return bestStep;
+        }
+    }
+
+    private static int calcScore(Factory friend, Factory enemy, int step, GameObject gameObject) {
+        int distance = gameObject.getDistances()[friend.id][enemy.id];
+        int enemyTroops = 0;
+        if(enemy.troopsOnStep.size() > distance + step) {
+            enemyTroops = enemy.troopsOnStep.get(distance + step);
+        } else {
+            enemyTroops = enemy.troopsOnStep.get(enemy.troopsOnStep.size() - 1) +
+                    enemy.production * (distance + step - enemy.troopsOnStep.size());
+        }
         int enemyProduction = Math.abs(enemy.own) * enemy.production;
         int score = MAX_SCORE;
         boolean friendly = false;
@@ -116,14 +149,14 @@ class AttacksEventAdder implements IEventAdder {
         if (friendly) {
             return MAX_SCORE;
         }
-        int sent = howMuchToSent(friend, enemy, gameObject);
+        int sent = howMuchToSent(friend, enemy, step, gameObject);
         if(sent==0) {
             return MAX_SCORE;
         }
         if (enemy.production > 0) {
-            score = distance + (int) (enemyProduction * (distance + 1) + enemyTroops) / enemy.production;
+            score = distance + (int) (enemyProduction * (distance + step + 1) + enemyTroops) / enemy.production;
         } else {
-            score = 30 + distance + (int) (enemyProduction * (distance + 1) + enemyTroops);
+            score = 30 + distance + (int) (enemyProduction * (distance + step + 1) + enemyTroops);
         }
         for(Integer troopsCount : friend.troopsOnStep) {
             if(troopsCount - sent < 0) {
@@ -133,25 +166,33 @@ class AttacksEventAdder implements IEventAdder {
         return score;
     }
 
-    private static int howMuchToSent(Factory friend, Factory enemy, GameObject gameObject) {
-        int distance = gameObject.getDistances()[friend.id][enemy.id] + 1;
-        int enemyTroops = enemy.troopsOnStep.get(distance);
+    private static int howMuchToSent(Factory friend, Factory enemy, int step, GameObject gameObject) {
+        int distance = gameObject.getDistances()[friend.id][enemy.id] + 1 + step;
+        int enemyTroops = 0;
+        if(enemy.troopsOnStep.size() > distance) {
+            enemyTroops = enemy.troopsOnStep.get(distance);
+        } else {
+            enemyTroops = enemy.troopsOnStep.get(enemy.troopsOnStep.size() - 1) +
+                    enemy.production * (distance - enemy.troopsOnStep.size());
+        }
         if(enemyTroops > 0) {
             return 0;
         }
         return Math.abs(enemyTroops) + 1;
     }
 
-    private static void recalculatePredictions(Factory friend, Factory enemy, GameObject gameObject, int sent) {
+    private static void recalculatePredictions(Factory friend, Factory enemy, GameObject gameObject, int sent, int step) {
         List<Integer> friendTroopsOnStep = friend.troopsOnStep;
         for (int i = 0; i < friendTroopsOnStep.size(); i++) {
             friend.troopsOnStep.set(i, friendTroopsOnStep.get(i) - sent);
         }
-        int distance = gameObject.getDistances()[friend.id][enemy.id];
+        int distance = gameObject.getDistances()[friend.id][enemy.id] + step;
         List<Troop> troops = gameObject.getTroops();
         troops.add(new Troop(1, friend.id, enemy.id, sent, distance));
         gameObject.setTroops(troops);
         enemy.calculateFutureTroops(gameObject.getFactories(), troops, gameObject.getFuturePrediction());
+        System.err.println(enemy.id);
+        System.err.println(enemy.troopsOnStep);
     }
 }
 
@@ -166,10 +207,35 @@ class MoveEvent implements IEvent {
         this.count = count;
         this.from = from;
         this.to = to;
+        System.err.println(step + " " + count + " " + from + " " + to);
     }
 
     public String toString() {
         return "MOVE " + from + " " + to + " " + count + "; ";
+    }
+
+    public boolean predictor(GameObject gameObject) {
+        List<Factory> factories = gameObject.getFactories();
+        for(Factory factory : factories) {
+            if(factory.id == from && factory.own != 1) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    @Override
+    public void updateGameObject(GameObject gameObject) {
+        List<Troop> troops = gameObject.getTroops();
+        troops.add(new Troop(1, from, to, count, gameObject.getDistances()[from][to]+step));
+        gameObject.setTroops(troops);
+
+        List<Factory> factories = gameObject.getFactories();
+        for(Factory factory : factories) {
+            if(factory.id == from && factory.own == 1) {
+                factory.troopsCount -= count;
+            }
+        }
     }
 
     public int getStep() {
@@ -178,7 +244,7 @@ class MoveEvent implements IEvent {
 
     @Override
     public int compareTo(IEvent o) {
-        return this.step > o.getStep() ? -1 : 1;
+        return this.step < o.getStep() ? -1 : 1;
     }
 }
 
@@ -410,6 +476,14 @@ class Player {
                     troops.add(new Troop(arg1, arg2, arg3, arg4, arg5));
                 }
             }
+
+            Iterator<IEvent> itr = eventsQueue.iterator();
+
+            while(itr.hasNext()) {
+                IEvent event = itr.next();
+                event.updateGameObject(gameObject);
+            }
+
             for (Factory f : factories) {
                 f.calculateFutureTroops(factories, troops, futureCalculationSteps);
             }
@@ -422,8 +496,12 @@ class Player {
             for (IEventAdder eventAdder : eventAdders) {
                 eventAdder.addEvents(eventsQueue, gameObject);
             }
+//            System.err.println(eventsQueue.peek().getStep() + "==" + step);
             while (eventsQueue.size() > 0 && eventsQueue.peek().getStep() == step) {
-                commands.append(eventsQueue.poll().toString());
+                IEvent event = eventsQueue.poll();
+                if(event.predictor(gameObject)) {
+                    commands.append(event.toString());
+                }
             }
 
 //            for (Factory f : factories) {
